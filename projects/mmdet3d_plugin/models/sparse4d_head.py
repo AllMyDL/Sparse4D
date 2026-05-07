@@ -184,6 +184,9 @@ class Sparse4DHead(BaseModule):
         ) = self.instance_bank.get(
             batch_size, metas, dn_metas=self.sampler.dn_metas
         )
+        # 这里拿到的是“当前 learnable 实例 + 历史缓存实例”的统一入口：
+        # instance_feature/anchor 表示当前帧基础实例，
+        # temp_instance_feature/temp_anchor 表示上一帧传播到当前坐标系的历史实例。
 
         # ========= prepare for denosing training ============
         # 1. get dn metas: noisy-anchors and corresponding GT
@@ -236,6 +239,8 @@ class Sparse4DHead(BaseModule):
                 ],
                 dim=1,
             )
+            # 训练时 normal query 和 dn query 一起送进 decoder，
+            # 但后面算 loss 时还会再按边界拆开。
             num_instance = instance_feature.shape[1]
             num_free_instance = num_instance - num_dn_anchor
             attn_mask = anchor.new_ones(
@@ -258,6 +263,7 @@ class Sparse4DHead(BaseModule):
             if self.layers[i] is None:
                 continue
             elif op == "temp_gnn":
+                # 当前实例先和历史实例做一次时序 attention，补充跨帧上下文。
                 instance_feature = self.graph_model(
                     i,
                     instance_feature,
@@ -270,6 +276,7 @@ class Sparse4DHead(BaseModule):
                     else None,
                 )
             elif op == "gnn":
+                # 同一帧内的实例之间再做 self-attention，缓解重复预测并交换上下文。
                 instance_feature = self.graph_model(
                     i,
                     instance_feature,
@@ -280,6 +287,7 @@ class Sparse4DHead(BaseModule):
             elif op == "norm" or op == "ffn":
                 instance_feature = self.layers[i](instance_feature)
             elif op == "deformable":
+                # 让每个 3D anchor 去多相机、多尺度图像特征上主动取证据。
                 instance_feature = self.layers[i](
                     instance_feature,
                     anchor,
@@ -302,6 +310,8 @@ class Sparse4DHead(BaseModule):
                 prediction.append(anchor)
                 classification.append(cls)
                 quality.append(qt)
+                # 第一阶段单帧 decoder 结束后，把历史实例和当前高置信实例重新整理，
+                # 后续 decoder 才会在“当前帧 + 时序记忆”上继续 refine。
                 if len(prediction) == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
                         instance_feature, anchor, cls
@@ -344,6 +354,7 @@ class Sparse4DHead(BaseModule):
 
         # split predictions of learnable instances and noisy instances
         if dn_metas is not None:
+            # dn query 只是训练时的辅助监督，因此输出阶段要和正常实例拆开。
             dn_classification = [
                 x[:, num_free_instance:] for x in classification
             ]
@@ -397,6 +408,7 @@ class Sparse4DHead(BaseModule):
         )
 
         # cache current instances for temporal modeling
+        # 当前帧结束后缓存 top-k 高置信实例，供下一帧 temp_gnn 使用。
         self.instance_bank.cache(
             instance_feature, anchor, cls, metas, feature_maps
         )
@@ -418,6 +430,7 @@ class Sparse4DHead(BaseModule):
             zip(cls_scores, reg_preds, quality)
         ):
             reg = reg[..., : len(self.reg_weights)]
+            # sample() 会完成 Hungarian matching，并返回每个 query 的分类/回归监督目标。
             cls_target, reg_target, reg_weights = self.sampler.sample(
                 cls,
                 reg,
@@ -433,6 +446,7 @@ class Sparse4DHead(BaseModule):
             )
             if self.cls_threshold_to_reg > 0:
                 threshold = self.cls_threshold_to_reg
+                # 分类分数太低的 query 不参与回归，避免把明显错误的框强行往 GT 拉。
                 mask = torch.logical_and(
                     mask, cls.max(dim=-1).values.sigmoid() > threshold
                 )
@@ -488,6 +502,7 @@ class Sparse4DHead(BaseModule):
                 "temp_dn_valid_mask" in model_outs
                 and decoder_idx == self.num_single_frame_decoder
             ):
+                # 进入时序阶段后，dn 监督会切换到 temporal dn 对齐后的目标。
                 (
                     dn_valid_mask,
                     dn_cls_target,

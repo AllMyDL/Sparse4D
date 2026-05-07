@@ -55,6 +55,8 @@ class SparseBox3DEncoder(BaseModule):
             self.output_fc = None
 
     def forward(self, box_3d: torch.Tensor):
+        # 把 3D 框拆成位置、尺寸、朝向、速度分别编码，
+        # 对应论文里 decoupled attention 的几何先验。
         pos_feat = self.pos_fc(box_3d[..., [X, Y, Z]])
         size_feat = self.size_fc(box_3d[..., [W, L, H]])
         yaw_feat = self.yaw_fc(box_3d[..., [SIN_YAW, COS_YAW]])
@@ -130,6 +132,7 @@ class SparseBox3DRefinementModule(BaseModule):
     ):
         feature = instance_feature + anchor_embed
         output = self.layers(feature)
+        # refine 不是从零回归 box，而是在上一轮 anchor 的基础上做增量修正。
         output[..., self.refine_state] = (
             output[..., self.refine_state] + anchor[..., self.refine_state]
         )
@@ -141,6 +144,7 @@ class SparseBox3DRefinementModule(BaseModule):
             if not isinstance(time_interval, torch.Tensor):
                 time_interval = instance_feature.new_tensor(time_interval)
             translation = torch.transpose(output[..., VX:], 0, -1)
+            # 速度分支先预测位移，再除以时间间隔恢复成速度，便于跨不同帧率泛化。
             velocity = torch.transpose(translation / time_interval, 0, -1)
             output[..., VX:] = velocity + anchor[..., VX:]
 
@@ -150,6 +154,7 @@ class SparseBox3DRefinementModule(BaseModule):
         else:
             cls = None
         if return_cls and self.with_quality_estimation:
+            # quality 分支输出 centerness / yawness，后续既参与训练也参与推理重排。
             quality = self.quality_layers(feature)
         else:
             quality = None
@@ -192,6 +197,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         size = anchor[..., None, [W, L, H]].exp()
         key_points = self.fix_scale * size
         if self.num_learnable_pts > 0 and instance_feature is not None:
+            # 除固定点外，再让模型学习一部分更灵活的采样点，提高取证据的自由度。
             learnable_scale = (
                 self.learnable_fc(instance_feature)
                 .reshape(bs, num_anchor, self.num_learnable_pts, 3)

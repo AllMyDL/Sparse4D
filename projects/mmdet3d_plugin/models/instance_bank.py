@@ -96,6 +96,8 @@ class InstanceBank(nn.Module):
             self.mask = torch.abs(time_interval) <= self.max_time_interval
 
             if self.anchor_handler is not None:
+                # 把历史帧坐标系下的 anchor 投影到当前帧坐标系，
+                # 这样 temp_gnn 用到的历史实例才和当前图像处在同一个几何空间里。
                 T_temp2cur = self.cached_anchor.new_tensor(
                     np.stack(
                         [
@@ -159,6 +161,7 @@ class InstanceBank(nn.Module):
 
         N = self.num_anchor - self.num_temp_instances
         confidence = confidence.max(dim=-1).values
+        # 当前帧保留一部分高置信实例，另一部分槽位留给上一帧传播过来的历史实例。
         _, (selected_feature, selected_anchor) = topk(
             confidence, N, instance_feature, anchor
         )
@@ -203,6 +206,7 @@ class InstanceBank(nn.Module):
         self.metas = metas
         confidence = confidence.max(dim=-1).values.sigmoid()
         if self.confidence is not None:
+            # 历史置信度做衰减，防止旧实例长期压制当前帧的新证据。
             confidence[:, : self.num_temp_instances] = torch.maximum(
                 self.confidence * self.confidence_decay,
                 confidence[:, : self.num_temp_instances],
@@ -227,6 +231,7 @@ class InstanceBank(nn.Module):
         mask = instance_id < 0
         if threshold is not None:
             mask = mask & (confidence >= threshold)
+        # 对还没有继承到历史 id 的高置信实例分配新 id。
         num_new_instance = mask.sum()
         new_ids = torch.arange(num_new_instance).to(instance_id) + self.prev_id
         instance_id[torch.where(mask)] = new_ids

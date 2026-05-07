@@ -52,6 +52,7 @@ class SparseBox3DDecoder(object):
 
         box_preds = box_preds[output_idx]
         bs, num_pred, num_cls = cls_scores.shape
+        # 先从所有 query、所有类别中挑出 top-k 候选，再做后续质量重排。
         cls_scores, indices = cls_scores.flatten(start_dim=1).topk(
             self.num_output, dim=1, sorted=self.sorted
         )
@@ -64,6 +65,7 @@ class SparseBox3DDecoder(object):
             centerness = qulity[output_idx][..., CNS]
             centerness = torch.gather(centerness, 1, indices // num_cls)
             cls_scores_origin = cls_scores.clone()
+            # 最终排序分数 = 分类置信度 * 几何中心质量。
             cls_scores *= centerness.sigmoid()
             cls_scores, idx = torch.sort(cls_scores, dim=1, descending=True)
             if not squeeze_cls:
@@ -88,6 +90,7 @@ class SparseBox3DDecoder(object):
                 if self.score_threshold is not None:
                     scores_origin = scores_origin[mask[i]]
 
+            # 把编码空间下的 box 还原成真实物理量，供评测和可视化使用。
             box = self.decode_box(box)
             output.append(
                 {

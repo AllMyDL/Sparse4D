@@ -63,6 +63,7 @@ class SparseBox3DLoss(nn.Module):
             )
 
         output = {}
+        # 主体 box loss 仍然是几何回归误差。
         box_loss = self.loss_box(
             box, box_target, weight=weight, avg_factor=avg_factor
         )
@@ -71,6 +72,7 @@ class SparseBox3DLoss(nn.Module):
         if quality is not None:
             cns = quality[..., CNS]
             yns = quality[..., YNS].sigmoid()
+            # centerness 监督：中心越接近 GT，质量 target 越接近 1。
             cns_target = torch.norm(
                 box_target[..., [X, Y, Z]] - box[..., [X, Y, Z]], p=2, dim=-1
             )
@@ -78,6 +80,7 @@ class SparseBox3DLoss(nn.Module):
             cns_loss = self.loss_cns(cns, cns_target, avg_factor=avg_factor)
             output[f"loss_cns{suffix}"] = cns_loss
 
+            # yawness 监督：判断预测朝向与 GT 是否同向。
             yns_target = (
                 torch.nn.functional.cosine_similarity(
                     box_target[..., [SIN_YAW, COS_YAW]],

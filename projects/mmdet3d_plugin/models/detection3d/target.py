@@ -48,6 +48,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
     def encode_reg_target(self, box_target, device=None):
         outputs = []
         for box in box_target:
+            # 训练统一在编码空间回归：尺度取 log，朝向改成 sin/cos，避免角度周期不连续。
             output = torch.cat(
                 [
                     box[..., [X, Y, Z]],
@@ -94,6 +95,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         indices = []
         for i in range(bs):
             if cls_cost[i] is not None and box_cost[i] is not None:
+                # 标准 Hungarian matching：分类代价 + 几何代价，做一对一分配。
                 cost = (cls_cost[i] + box_cost[i]).detach().cpu().numpy()
                 cost = np.where(np.isneginf(cost) | np.isnan(cost), 1e8, cost)
                 assign = linear_sum_assignment(cost)
@@ -124,6 +126,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         cost = []
         for i in range(bs):
             if len(cls_target[i]) > 0:
+                # 这里的代价形式刻意贴近 focal loss，本质上是在估计“分到该类有多划算”。
                 neg_cost = (
                     -(1 - cls_pred[i] + self.eps).log()
                     * (1 - self.alpha)
@@ -147,6 +150,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         cost = []
         for i in range(bs):
             if len(box_target[i]) > 0:
+                # 不同 box 维度可配置不同权重，例如位置通常比速度更重要。
                 cost.append(
                     torch.sum(
                         torch.abs(box_pred[i, :, None] - box_target[i][None])
@@ -203,10 +207,12 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             if gt_instance_id is not None:
                 gt_instance_id = gt_instance_id.tile(self.num_dn_groups, 1)
 
+        # 在 GT 周围加噪，构造“被扰动过的查询”，训练模型把它们拉回正确位置。
         noise = torch.rand_like(box_target) * 2 - 1
         noise *= box_target.new_tensor(self.dn_noise_scale)
         dn_anchor = box_target + noise
         if self.add_neg_dn:
+            # 负 dn 样本偏移更大，提醒模型学会区分“离 GT 很远的错误查询”。
             noise_neg = torch.rand_like(box_target) + 1
             flag = torch.where(
                 torch.rand_like(box_target) > 0.5,
@@ -279,6 +285,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         for i in range(self.num_dn_groups):
             start = num_gt * i
             end = start + num_gt
+            # 只允许同一 dn group 内部互相可见，避免不同噪声组之间信息泄漏。
             attn_mask[start:end, start:end] = 0
         attn_mask = attn_mask == 1
         dn_cls_target = dn_cls_target.long()

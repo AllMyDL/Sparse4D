@@ -118,7 +118,9 @@ class DeformableFeatureAggregation(BaseModule):
         **kwargs: dict,
     ):
         bs, num_anchor = instance_feature.shape[:2]
+        # 先在每个 3D anchor 内部生成若干关键点，后面会把这些点投到图像上采样。
         key_points = self.kps_generator(anchor, instance_feature)
+        # 权重由实例语义 + 几何编码共同预测，决定该信任哪个相机/尺度/采样点。
         weights = self._get_weights(instance_feature, anchor_embed, metas)
 
         if self.use_deformable_func:
@@ -147,6 +149,7 @@ class DeformableFeatureAggregation(BaseModule):
                 bs, num_anchor, self.embed_dims
             )
         else:
+            # 纯 PyTorch 路径更便于理解：先采样，再做多相机/多尺度融合。
             features = self.feature_sampling(
                 feature_maps,
                 key_points,
@@ -159,6 +162,7 @@ class DeformableFeatureAggregation(BaseModule):
         if self.residual_mode == "add":
             output = output + instance_feature
         elif self.residual_mode == "cat":
+            # 当前配置使用 cat，把“新取到的视觉证据”和“原实例特征”同时交给后续 FFN。
             output = torch.cat([output, instance_feature], dim=-1)
         return output
 
@@ -166,6 +170,8 @@ class DeformableFeatureAggregation(BaseModule):
         bs, num_anchor = instance_feature.shape[:2]
         feature = instance_feature + anchor_embed
         if self.camera_encoder is not None:
+            # 相机外参与内参被编码成 camera embedding，
+            # 让模型知道同一个 anchor 在不同视角下应如何分配权重。
             camera_embed = self.camera_encoder(
                 metas["projection_mat"][:, :, :3].reshape(
                     bs, self.num_cams, -1
@@ -187,6 +193,7 @@ class DeformableFeatureAggregation(BaseModule):
             )
         )
         if self.training and self.attn_drop > 0:
+            # 训练时随机丢弃部分 attention 权重，减少模型过度依赖单一视角或单一点。
             mask = torch.rand(
                 bs, num_anchor, self.num_cams, 1, self.num_pts, 1
             )
@@ -203,6 +210,7 @@ class DeformableFeatureAggregation(BaseModule):
         pts_extend = torch.cat(
             [key_points, torch.ones_like(key_points[..., :1])], dim=-1
         )
+        # 标准齐次坐标投影：3D 点 -> 相机平面 2D 点。
         points_2d = torch.matmul(
             projection_mat[:, :, None, None], pts_extend[:, None, ..., None]
         ).squeeze(-1)
@@ -232,6 +240,7 @@ class DeformableFeatureAggregation(BaseModule):
 
         features = []
         for fm in feature_maps:
+            # grid_sample 在每个尺度上按投影位置采样，得到该 anchor 的图像证据。
             features.append(
                 torch.nn.functional.grid_sample(
                     fm.flatten(end_dim=1), points_2d

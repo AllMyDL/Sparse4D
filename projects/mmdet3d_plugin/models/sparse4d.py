@@ -64,6 +64,7 @@ class Sparse4D(BaseDetector):
         bs = img.shape[0]
         if img.dim() == 5:  # multi-view
             num_cams = img.shape[1]
+            # Backbone/FPN 仍按普通 2D 图像处理，因此先把相机维压到 batch 维里。
             img = img.flatten(end_dim=1)
         else:
             num_cams = 1
@@ -76,14 +77,17 @@ class Sparse4D(BaseDetector):
         if self.img_neck is not None:
             feature_maps = list(self.img_neck(feature_maps))
         for i, feat in enumerate(feature_maps):
+            # Neck 输出后再恢复成 (bs, num_cams, C, H, W)，后续稀疏实例会逐相机取特征。
             feature_maps[i] = torch.reshape(
                 feat, (bs, num_cams) + feat.shape[1:]
             )
         if return_depth and self.depth_branch is not None:
+            # 深度分支只用于辅助监督，帮助图像特征带上更强的几何感知。
             depths = self.depth_branch(feature_maps, metas.get("focal"))
         else:
             depths = None
         if self.use_deformable_func:
+            # 自定义 CUDA op 需要特定的 feature map 布局，这里提前做格式转换。
             feature_maps = feature_maps_format(feature_maps)
         if return_depth:
             return feature_maps, depths
@@ -98,6 +102,7 @@ class Sparse4D(BaseDetector):
 
     def forward_train(self, img, **data):
         feature_maps, depths = self.extract_feat(img, True, data)
+        # Head 内部会完成时序实例获取、多轮 decoder refine，以及 dn query 的拼接。
         model_outs = self.head(feature_maps, data)
         output = self.head.loss(model_outs, data)
         if depths is not None and "gt_depth" in data:
@@ -116,6 +121,7 @@ class Sparse4D(BaseDetector):
         feature_maps = self.extract_feat(img)
 
         model_outs = self.head(feature_maps, data)
+        # 推理阶段由 decoder 完成 top-k、质量重排以及最终 box 解码。
         results = self.head.post_process(model_outs)
         output = [{"img_bbox": result} for result in results]
         return output
