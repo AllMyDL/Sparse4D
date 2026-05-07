@@ -9,6 +9,7 @@ class BaseTargetWithDenoising(ABC):
         super(BaseTargetWithDenoising, self).__init__()
         self.num_dn_groups = num_dn_groups
         self.num_temp_dn_groups = num_temp_dn_groups
+        # dn_metas 会跨帧暂存 denoising query 的状态，供 temporal dn 使用。
         self.dn_metas = None
 
     @abstractmethod
@@ -46,4 +47,5 @@ class BaseTargetWithDenoising(ABC):
         """
         if self.num_temp_dn_groups < 0:
             return
+        # 基类只缓存最小公共信息；子类可在此基础上继续追加监督字段。
         self.dn_metas = dict(dn_anchor=dn_anchor[:, : self.num_temp_dn_groups])

@@ -189,6 +189,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     len(np.bincount(new_flags))
                     == len(np.bincount(self.flag)) * self.sequences_split_num
                 )
+                # 长序列再细分成更短子序列，便于 sampler 按序列组织 batch。
                 self.flag = np.array(new_flags, dtype=np.int64)
 
     def get_augmentation(self):
@@ -197,6 +198,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         H, W = self.data_aug_conf["H"], self.data_aug_conf["W"]
         fH, fW = self.data_aug_conf["final_dim"]
         if not self.test_mode:
+            # 训练阶段使用随机几何增强；测试阶段使用确定性裁剪。
             resize = np.random.uniform(*self.data_aug_conf["resize_lim"])
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
@@ -243,6 +245,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             idx = idx["idx"]
         else:
             aug_config = self.get_augmentation()
+        # 将增强参数和样本元信息一起送入 pipeline，保证图像/框/投影矩阵同步变化。
         data = self.get_data_info(idx)
         data["aug_config"] = aug_config
         data = self.pipeline(data)
@@ -264,6 +267,7 @@ class NuScenes3DDetTrackDataset(Dataset):
 
     def load_annotations(self, ann_file):
         data = mmcv.load(ann_file, file_format="pkl")
+        # 时序模型默认按时间顺序读取样本，因此这里先按 timestamp 排序。
         data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
         data_infos = data_infos[:: self.load_interval]
         self.metadata = data["metadata"]
@@ -294,6 +298,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             info["ego2global_rotation"]
         ).rotation_matrix
         ego2global[:3, 3] = np.array(info["ego2global_translation"])
+        # 先准备 lidar2global，后面时序实例投影和评测都会依赖它。
         input_dict["lidar2global"] = ego2global @ lidar2ego
 
         if self.modality["use_camera"]:
@@ -336,6 +341,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             mask = info["valid_flag"]
         else:
             mask = info["num_lidar_pts"] > 0
+        # 默认去掉没有 lidar 点支撑的 GT，减少特别稀疏目标带来的监督噪声。
         gt_bboxes_3d = info["gt_boxes"][mask]
         gt_names_3d = info["gt_names"][mask]
         gt_labels_3d = []
@@ -350,6 +356,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             gt_velocity = info["gt_velocity"][mask]
             nan_mask = np.isnan(gt_velocity[:, 0])
             gt_velocity[nan_mask] = [0.0, 0.0]
+            # 速度直接拼接到 box 后面，与 Sparse4D 的状态向量定义对齐。
             gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
 
         anns_results = dict(
@@ -373,6 +380,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 det, threshold=self.tracking_threshold if tracking else None
             )
             sample_token = self.data_infos[sample_id]["token"]
+            # 模型输出还在 lidar 坐标系，需要先转到 nuScenes 官方评测使用的全局坐标系。
             boxes = lidar_nusc_box_to_global(
                 self.data_infos[sample_id],
                 boxes,
@@ -555,6 +563,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 print(f"\nFormating bboxes of {name}")
                 results_ = [out[name] for out in results]
                 tmp_file_ = osp.join(jsonfile_prefix, name)
+                # 多分支结果分别导出，便于独立评测不同输出头。
                 result_files.update(
                     {
                         name: self._format_bbox(
@@ -722,6 +731,7 @@ def output_to_nusc_box(detection, threshold=None):
             mask = detection["cls_scores"].numpy() >= threshold
         else:
             mask = scores >= threshold
+        # tracking 可按原始分类分数再做一层过滤，减少低质量轨迹碎片。
         box3d = box3d[mask]
         scores = scores[mask]
         labels = labels[mask]
@@ -750,6 +760,7 @@ def output_to_nusc_box(detection, threshold=None):
             velocity = (*box3d.tensor[i, 7:9], 0.0)
         else:
             velocity = (*box3d[i, 7:9], 0.0)
+        # NuScenesBox 是官方评测工具链通用的 box 表示。
         box = NuScenesBox(
             box_gravity_center[i],
             nus_box_dims[i],

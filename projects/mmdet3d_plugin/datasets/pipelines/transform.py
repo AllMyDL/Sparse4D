@@ -19,6 +19,7 @@ class MultiScaleDepthMapGenerator(object):
         for i, lidar2img in enumerate(input_dict["lidar2img"]):
             H, W = input_dict["img_shape"][i][:2]
 
+            # 将 lidar 点投到各相机图像，生成辅助深度监督。
             pts_2d = (
                 np.squeeze(lidar2img[:3, :3] @ points, axis=-1)
                 + lidar2img[:3, 3]
@@ -39,6 +40,7 @@ class MultiScaleDepthMapGenerator(object):
             )
             V, U, depths = V[mask], U[mask], depths[mask]
             sort_idx = np.argsort(depths)[::-1]
+            # 从远到近写入像素，后写入的近点会覆盖远点，近似保留可见表面深度。
             V, U, depths = V[sort_idx], U[sort_idx], depths[sort_idx]
             depths = np.clip(depths, 0.1, self.max_depth)
             for j, downsample in enumerate(self.downsample):
@@ -61,6 +63,7 @@ class NuScenesSparse4DAdaptor(object):
         pass
 
     def __call__(self, input_dict):
+        # 统一整理 Sparse4D 直接会用到的几何字段，避免后续模块重复拼装。
         input_dict["projection_mat"] = np.float32(
             np.stack(input_dict["lidar2img"])
         )
@@ -73,6 +76,7 @@ class NuScenesSparse4DAdaptor(object):
             input_dict["cam_intrinsic"] = np.float32(
                 np.stack(input_dict["cam_intrinsic"])
             )
+            # 深度辅助分支只需要每个相机的焦距。
             input_dict["focal"] = input_dict["cam_intrinsic"][..., 0, 0]
             # input_dict["focal"] = np.sqrt(
             #     np.abs(np.linalg.det(input_dict["cam_intrinsic"][:, :2, :2]))
@@ -81,6 +85,7 @@ class NuScenesSparse4DAdaptor(object):
             input_dict["instance_id"] = input_dict["instance_inds"]
 
         if "gt_bboxes_3d" in input_dict:
+            # 先把 yaw 约束到固定周期内，减轻角度周期性带来的不连续。
             input_dict["gt_bboxes_3d"][:, 6] = self.limit_period(
                 input_dict["gt_bboxes_3d"][:, 6], offset=0.5, period=2 * np.pi
             )
@@ -94,6 +99,7 @@ class NuScenesSparse4DAdaptor(object):
 
         imgs = [img.transpose(2, 0, 1) for img in input_dict["img"]]
         imgs = np.ascontiguousarray(np.stack(imgs, axis=0))
+        # 输出成 (num_cams, C, H, W)，与模型的多目输入格式一致。
         input_dict["img"] = DC(to_tensor(imgs), stack=True)
         return input_dict
 
@@ -130,6 +136,7 @@ class InstanceNameFilter(object):
         gt_bboxes_mask = np.array(
             [n in self.labels for n in gt_labels_3d], dtype=np.bool_
         )
+        # 仅保留当前实验定义的类别，其他类别在训练前直接过滤掉。
         input_dict["gt_bboxes_3d"] = input_dict["gt_bboxes_3d"][gt_bboxes_mask]
         input_dict["gt_labels_3d"] = input_dict["gt_labels_3d"][gt_bboxes_mask]
         if "instance_inds" in input_dict:
@@ -161,6 +168,7 @@ class CircleObjectRangeFilter(object):
         )
         mask = np.array([False] * len(dist))
         for label_idx, dist_thred in enumerate(self.class_dist_thred):
+            # 不同类别允许的感兴趣距离不同，因此按类别分别做圆形范围过滤。
             mask = np.logical_or(
                 mask,
                 np.logical_and(gt_labels_3d == label_idx, dist <= dist_thred),
@@ -211,6 +219,7 @@ class NormalizeMultiviewImage(object):
             mmcv.imnormalize(img, self.mean, self.std, self.to_rgb)
             for img in results["img"]
         ]
+        # 顺手记录归一化配置，便于后处理和可视化复用。
         results["img_norm_cfg"] = dict(
             mean=self.mean, std=self.std, to_rgb=self.to_rgb
         )

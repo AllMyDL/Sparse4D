@@ -84,6 +84,8 @@ class DistributedGroupSampler(Sampler):
                         size * 1.0 / self.samples_per_gpu / self.num_replicas
                     )
                 ) * self.samples_per_gpu * self.num_replicas - len(indice)
+                # 每个 group 都补齐到“能被 world_size 和 batch_size 整除”的长度，
+                # 这样分布式切分后每张卡都能拿到完整 batch。
                 # pad indice
                 tmp = indice.copy()
                 for _ in range(extra // size):
@@ -106,6 +108,7 @@ class DistributedGroupSampler(Sampler):
         ]
 
         # subsample
+        # 最后再按 rank 切片，保证不同 GPU 读到互不重叠的数据子集。
         offset = self.num_samples * self.rank
         indices = indices[offset : offset + self.num_samples]
         assert len(indices) == self.num_samples

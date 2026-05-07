@@ -48,6 +48,7 @@ class LoadMultiViewImageFromFiles(object):
         results["filename"] = filename
         # unravel to list, see `DefaultFormatBundle` in formatting.py
         # which will transpose each image separately and then stack into array
+        # 先拆成 list，便于后续针对每个视角分别做几何增强。
         results["img"] = [img[..., i] for i in range(img.shape[-1])]
         results["img_shape"] = img.shape
         results["ori_shape"] = img.shape
@@ -161,6 +162,7 @@ class LoadPointsFromFile(object):
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
         attribute_dims = None
+        # 在 Sparse4D 里点云主要用于生成辅助深度图，而不是直接送入主干。
 
         if self.shift_height:
             floor_height = np.percentile(points[:, 2], 0.99)

@@ -52,6 +52,7 @@ def build_dataloader(
     batch_sampler = None
     if runner_type == 'IterBasedRunner':
         print("Use GroupInBatchSampler !!!")
+        # IterBasedRunner 下通过 batch_sampler 显式控制每一步取样本的方式。
         batch_sampler = GroupInBatchSampler(
             dataset,
             samples_per_gpu,
@@ -127,6 +128,7 @@ def worker_init_fn(worker_id, num_workers, rank, seed):
     # The seed of each worker equals to
     # num_worker * rank + worker_id + user_seed
     worker_seed = num_workers * rank + worker_id + seed
+    # 保证多进程数据增强时的随机性可复现。
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
@@ -187,6 +189,7 @@ def custom_build_dataset(cfg, default_args=None):
     elif isinstance(cfg.get("ann_file"), (list, tuple)):
         dataset = _concat_dataset(cfg, default_args)
     else:
+        # 普通数据集最终都走 registry 动态构建。
         dataset = build_from_cfg(cfg, DATASETS, default_args)
 
     return dataset

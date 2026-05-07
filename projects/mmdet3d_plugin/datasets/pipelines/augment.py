@@ -21,6 +21,7 @@ class ResizeCropFlipImage(object):
                 np.uint8(imgs[i]), aug_config,
             )
             new_imgs.append(np.array(img).astype(np.float32))
+            # 图像做了 2D 变换后，lidar2img 也必须左乘同样的像素平面变换。
             results["lidar2img"][i] = mat @ results["lidar2img"][i]
             if "cam_intrinsic" in results:
                 results["cam_intrinsic"][i][:3, :3] *= aug_config["resize"]
@@ -58,6 +59,7 @@ class ResizeCropFlipImage(object):
             img = img / scale + min_value
 
         transform_matrix = np.eye(3)
+        # 显式组合 resize/crop/flip/rotate，对应图像上发生的全部仿射变化。
         transform_matrix[:2, :2] *= resize
         transform_matrix[:2, 2] -= np.array(crop[:2])
         if flip:
@@ -100,6 +102,7 @@ class BBoxRotation(object):
 
         num_view = len(results["lidar2img"])
         for view in range(num_view):
+            # 3D 旋转增强发生在 lidar 坐标系，因此相机投影矩阵也要做反向补偿。
             results["lidar2img"][view] = (
                 results["lidar2img"][view] @ rot_mat_inv
             )
@@ -122,6 +125,7 @@ class BBoxRotation(object):
         bbox_3d[:, 6] += angle
         if bbox_3d.shape[-1] > 7:
             vel_dims = bbox_3d[:, 7:].shape[-1]
+            # 速度也是向量，旋转框时要同步旋转速度方向。
             bbox_3d[:, 7:] = bbox_3d[:, 7:] @ rot_mat_T[:vel_dims, :vel_dims]
         return bbox_3d
 
@@ -219,6 +223,7 @@ class PhotoMetricDistortionMultiViewImage:
             if random.randint(2):
                 img = img[..., random.permutation(3)]
             new_imgs.append(img)
+        # 这里只改变颜色分布，不改变几何关系，因此不需要改投影矩阵。
         results["img"] = new_imgs
         return results
 

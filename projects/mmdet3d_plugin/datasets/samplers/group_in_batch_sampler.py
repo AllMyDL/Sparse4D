@@ -93,6 +93,8 @@ class GroupInBatchSampler(Sampler):
 
         # Get a generator per sample idx. Considering samples over all
         # GPUs, each sample position has its own generator
+        # 直观理解：同一个 global batch 中的每个“槽位”都沿着自己的序列前进，
+        # 这样整个 batch 可以同时覆盖多个不同序列。
         self.group_indices_per_global_sample_idx = [
             self._group_indices_per_global_sample_idx(
                 self.rank * self.batch_size + local_sample_idx
@@ -131,6 +133,7 @@ class GroupInBatchSampler(Sampler):
                 if len(self.buffer_per_local_sample[local_sample_idx]) == 0:
                     # Finished current group, refill with next group
                     # skip = False
+                    # 当前槽位的序列样本耗尽后，再切到下一个 group/序列。
                     new_group_idx = next(
                         self.group_indices_per_global_sample_idx[
                             local_sample_idx
@@ -148,16 +151,19 @@ class GroupInBatchSampler(Sampler):
                             ::-1
                         ]
                     if self.dataset.keep_consistent_seq_aug:
+                        # 同一条序列内部共享增强参数，避免相邻帧的几何关系被破坏。
                         self.aug_per_local_sample[
                             local_sample_idx
                         ] = self.dataset.get_augmentation()
 
                 if not self.dataset.keep_consistent_seq_aug:
+                    # 如果不要求序列内增强一致，就为每个样本单独采样增强参数。
                     self.aug_per_local_sample[
                         local_sample_idx
                     ] = self.dataset.get_augmentation()
 
                 if skip:
+                    # skip 的作用是随机跳过序列中的部分帧，增加时间间隔多样性。
                     self.buffer_per_local_sample[local_sample_idx].pop(0)
                 curr_batch.append(
                     dict(
