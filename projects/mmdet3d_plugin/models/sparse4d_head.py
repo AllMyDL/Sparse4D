@@ -54,15 +54,22 @@ class Sparse4DHead(BaseModule):
         **kwargs,
     ):
         super(Sparse4DHead, self).__init__(init_cfg)
+        # num_decoder: decoder 总层数。
         self.num_decoder = num_decoder
+        # num_single_frame_decoder: 前几层只看当前帧，之后才引入时序交互。
         self.num_single_frame_decoder = num_single_frame_decoder
+        # gt_cls_key / gt_reg_key: 从 data 字典中读取 GT 类别和 GT 3D 框的键名。
         self.gt_cls_key = gt_cls_key
         self.gt_reg_key = gt_reg_key
+        # cls_threshold_to_reg: 低分类分数 query 是否允许参与回归监督的阈值。
         self.cls_threshold_to_reg = cls_threshold_to_reg
+        # dn_loss_weight: 预留给 denoising loss 的权重超参。
         self.dn_loss_weight = dn_loss_weight
+        # decouple_attn=True 时，几何编码和实例特征会先拼接再送入 attention。
         self.decouple_attn = decouple_attn
 
         if reg_weights is None:
+            # reg_weights: 各个 box 状态维度的损失权重。
             self.reg_weights = [1.0] * 10
         else:
             self.reg_weights = reg_weights
@@ -80,6 +87,7 @@ class Sparse4DHead(BaseModule):
             ] * num_decoder
             # delete the 'gnn' and 'norm' layers in the first transformer blocks
             operation_order = operation_order[3:]
+        # operation_order: 显式定义每层 decoder 执行哪些操作以及顺序。
         self.operation_order = operation_order
 
         # =========== build modules ===========
@@ -88,12 +96,17 @@ class Sparse4DHead(BaseModule):
                 return None
             return build_from_cfg(cfg, registry)
 
+        # instance_bank: 管理 learnable anchors、历史实例缓存和 tracking id。
         self.instance_bank = build(instance_bank, PLUGIN_LAYERS)
+        # anchor_encoder: 把 3D 框状态编码成 attention/refine 可用的几何 embedding。
         self.anchor_encoder = build(anchor_encoder, POSITIONAL_ENCODING)
+        # sampler: 负责 Hungarian matching 和 dn target 构造。
         self.sampler = build(sampler, BBOX_SAMPLERS)
+        # decoder: 推理时把编码空间下的输出恢复成最终 3D box。
         self.decoder = build(decoder, BBOX_CODERS)
         self.loss_cls = build(loss_cls, LOSSES)
         self.loss_reg = build(loss_reg, LOSSES)
+        # op_config_map: 把字符串 op 映射到具体模块配置，便于按 operation_order 动态构建 decoder。
         self.op_config_map = {
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
@@ -110,6 +123,8 @@ class Sparse4DHead(BaseModule):
         )
         self.embed_dims = self.instance_bank.embed_dims
         if self.decouple_attn:
+            # fc_before / fc_after: 当 decouple_attn 开启时，attention 的 value 通道会先扩到 2*D，
+            # 与 query/key 中拼接后的 [instance_feature, anchor_embed] 维度对齐。
             self.fc_before = nn.Linear(
                 self.embed_dims, self.embed_dims * 2, bias=False
             )
@@ -125,6 +140,7 @@ class Sparse4DHead(BaseModule):
             if self.layers[i] is None:
                 continue
             elif op != "refine":
+                # refine 模块通常有自己定制的初始化；其余层统一做 Xavier 初始化。
                 for p in self.layers[i].parameters():
                     if p.dim() > 1:
                         nn.init.xavier_uniform_(p)
@@ -143,11 +159,14 @@ class Sparse4DHead(BaseModule):
         **kwargs,
     ):
         if self.decouple_attn:
+            # query/query_pos 分别对应“实例语义特征”和“几何位置编码”，
+            # decoupled attention 下直接在通道维拼接。
             query = torch.cat([query, query_pos], dim=-1)
             if key is not None:
                 key = torch.cat([key, key_pos], dim=-1)
             query_pos, key_pos = None, None
         if value is not None:
+            # value 也要扩到 2D 维，和拼接后的 query/key 处在同一特征空间。
             value = self.fc_before(value)
         return self.fc_after(
             self.layers[index](
@@ -167,6 +186,7 @@ class Sparse4DHead(BaseModule):
     ):
         if isinstance(feature_maps, torch.Tensor):
             feature_maps = [feature_maps]
+        # batch_size: 当前 batch 内的样本数。
         batch_size = feature_maps[0].shape[0]
 
         # ========= get instance info ============
@@ -187,16 +207,21 @@ class Sparse4DHead(BaseModule):
         # 这里拿到的是“当前 learnable 实例 + 历史缓存实例”的统一入口：
         # instance_feature/anchor 表示当前帧基础实例，
         # temp_instance_feature/temp_anchor 表示上一帧传播到当前坐标系的历史实例。
+        # time_interval 表示当前帧与历史帧的时间差，后续 refine 速度分支会使用。
 
         # ========= prepare for denosing training ============
         # 1. get dn metas: noisy-anchors and corresponding GT
         # 2. concat learnable instances and noisy instances
         # 3. get attention mask
+        # attn_mask: 控制哪些 query 之间允许注意力交互，尤其用于隔离不同 dn group。
         attn_mask = None
+        # dn_metas: sampler 构造出的 noisy queries 及其监督目标。
         dn_metas = None
+        # temp_dn_reg_target: temporal dn 对齐后得到的回归目标。
         temp_dn_reg_target = None
         if self.training and hasattr(self.sampler, "get_dn_anchors"):
             if "instance_id" in metas["img_metas"][0]:
+                # gt_instance_id: 用于 temporal dn 对齐的真实实例 id。
                 gt_instance_id = [
                     torch.from_numpy(x["instance_id"]).cuda()
                     for x in metas["img_metas"]
@@ -217,8 +242,10 @@ class Sparse4DHead(BaseModule):
                 valid_mask,
                 dn_id_target,
             ) = dn_metas
+            # num_dn_anchor: 当前 batch 每个样本额外拼接进来的 dn query 数。
             num_dn_anchor = dn_anchor.shape[1]
             if dn_anchor.shape[-1] != anchor.shape[-1]:
+                # 若 dn anchor 的状态维度比正常 anchor 少，则在尾部补零对齐。
                 remain_state_dims = anchor.shape[-1] - dn_anchor.shape[-1]
                 dn_anchor = torch.cat(
                     [
@@ -236,28 +263,35 @@ class Sparse4DHead(BaseModule):
                     instance_feature.new_zeros(
                         batch_size, num_dn_anchor, instance_feature.shape[-1]
                     ),
-                ],
-                dim=1,
-            )
+                    ],
+                    dim=1,
+                )
             # 训练时 normal query 和 dn query 一起送进 decoder，
             # 但后面算 loss 时还会再按边界拆开。
+            # num_instance: 拼接后总 query 数；num_free_instance: 正常实例 query 数。
             num_instance = instance_feature.shape[1]
             num_free_instance = num_instance - num_dn_anchor
             attn_mask = anchor.new_ones(
                 (num_instance, num_instance), dtype=torch.bool
             )
+            # 正常实例之间默认可见；dn query 之间是否可见由 dn_attn_mask 控制。
             attn_mask[:num_free_instance, :num_free_instance] = False
             attn_mask[num_free_instance:, num_free_instance:] = dn_attn_mask
 
+        # anchor_embed: 当前帧所有 query 对应的几何编码。
         anchor_embed = self.anchor_encoder(anchor)
         if temp_anchor is not None:
+            # temp_anchor_embed: 历史实例的几何编码，供 temp_gnn 使用。
             temp_anchor_embed = self.anchor_encoder(temp_anchor)
         else:
             temp_anchor_embed = None
 
         # =================== forward the layers ====================
+        # prediction: 存每一轮 refine 后的 box 状态。
         prediction = []
+        # classification: 存每一轮 decoder 的分类 logits。
         classification = []
+        # quality: 存每一轮 decoder 的质量预测，例如 centerness / yawness。
         quality = []
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -296,6 +330,7 @@ class Sparse4DHead(BaseModule):
                     metas,
                 )
             elif op == "refine":
+                # cls: 当前层分类输出；qt: 当前层质量输出。
                 anchor, cls, qt = self.layers[i](
                     instance_feature,
                     anchor,
@@ -321,6 +356,7 @@ class Sparse4DHead(BaseModule):
                         and self.sampler.num_temp_dn_groups > 0
                         and dn_id_target is not None
                     ):
+                        # temporal dn 会尝试把上一帧 dn query 和当前帧同一真实实例对齐。
                         (
                             instance_feature,
                             anchor,
@@ -339,11 +375,13 @@ class Sparse4DHead(BaseModule):
                             self.instance_bank.mask,
                         )
                 if i != len(self.operation_order) - 1:
+                    # refine 后 anchor 已变化，下一层 attention/deformable 必须使用新的几何编码。
                     anchor_embed = self.anchor_encoder(anchor)
                 if (
                     len(prediction) > self.num_single_frame_decoder
                     and temp_anchor_embed is not None
                 ):
+                    # 时序阶段只保留最前面的历史实例槽位作为 temp queries。
                     temp_anchor_embed = anchor_embed[
                         :, : self.instance_bank.num_temp_instances
                     ]
@@ -385,6 +423,8 @@ class Sparse4DHead(BaseModule):
                 )
                 dn_cls_target = temp_dn_cls_target
                 valid_mask = temp_valid_mask
+            # 此时 instance_feature/anchor/cls 仍包含 normal + dn 两部分，
+            # 下面继续按边界剥离，恢复成纯正常实例布局。
             dn_instance_feature = instance_feature[:, num_free_instance:]
             dn_anchor = anchor[:, num_free_instance:]
             instance_feature = instance_feature[:, :num_free_instance]
@@ -422,6 +462,7 @@ class Sparse4DHead(BaseModule):
     @force_fp32(apply_to=("model_outs"))
     def loss(self, model_outs, data, feature_maps=None):
         # ===================== prediction losses ======================
+        # cls_scores / reg_preds / quality 都是“多层 decoder 输出”的列表。
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         quality = model_outs["quality"]
@@ -429,6 +470,7 @@ class Sparse4DHead(BaseModule):
         for decoder_idx, (cls, reg, qt) in enumerate(
             zip(cls_scores, reg_preds, quality)
         ):
+            # reg 可能比真正参与损失的状态维更长，因此先截断到 reg_weights 长度。
             reg = reg[..., : len(self.reg_weights)]
             # sample() 会完成 Hungarian matching，并返回每个 query 的分类/回归监督目标。
             cls_target, reg_target, reg_weights = self.sampler.sample(
@@ -438,9 +480,11 @@ class Sparse4DHead(BaseModule):
                 data[self.gt_reg_key],
             )
             reg_target = reg_target[..., : len(self.reg_weights)]
+            # mask=True 表示该 query 匹配到了有效 GT，因此需要参与 box 回归。
             mask = torch.logical_not(torch.all(reg_target == 0, dim=-1))
             mask_valid = mask.clone()
 
+            # num_pos: 分布式环境下归一化后的正样本数，用作 loss 平均因子。
             num_pos = max(
                 reduce_mean(torch.sum(mask).to(dtype=reg.dtype)), 1.0
             )
@@ -451,10 +495,12 @@ class Sparse4DHead(BaseModule):
                     mask, cls.max(dim=-1).values.sigmoid() > threshold
                 )
 
+            # 分类 loss 在全部 query 上算，包含正样本和背景。
             cls = cls.flatten(end_dim=1)
             cls_target = cls_target.flatten(end_dim=1)
             cls_loss = self.loss_cls(cls, cls_target, avg_factor=num_pos)
 
+            # 回归 loss 只在有效正样本上计算。
             mask = mask.reshape(-1)
             reg_weights = reg_weights * reg.new_tensor(self.reg_weights)
             reg_target = reg_target.flatten(end_dim=1)[mask]
@@ -465,6 +511,7 @@ class Sparse4DHead(BaseModule):
             )
             cls_target = cls_target[mask]
             if qt is not None:
+                # qt 只在参与回归的正样本上保留，供质量损失使用。
                 qt = qt.flatten(end_dim=1)[mask]
 
             reg_loss = self.loss_reg(
@@ -484,6 +531,7 @@ class Sparse4DHead(BaseModule):
             return output
 
         # ===================== denoising losses ======================
+        # dn_* 对应训练时额外拼接进去的 noisy queries。
         dn_cls_scores = model_outs["dn_classification"]
         dn_reg_preds = model_outs["dn_prediction"]
 
@@ -512,11 +560,13 @@ class Sparse4DHead(BaseModule):
                     num_dn_pos,
                 ) = self.prepare_for_dn_loss(model_outs, prefix="temp_")
 
+            # dn 分类 loss 只对 valid dn query 计算，不把 padding 的 dn 条目算进去。
             cls_loss = self.loss_cls(
                 cls.flatten(end_dim=1)[dn_valid_mask],
                 dn_cls_target,
                 avg_factor=num_dn_pos,
             )
+            # dn 回归 loss 进一步只在正 dn 样本上计算。
             reg_loss = self.loss_reg(
                 reg.flatten(end_dim=1)[dn_valid_mask][dn_pos_mask][
                     ..., : len(self.reg_weights)
@@ -531,18 +581,24 @@ class Sparse4DHead(BaseModule):
         return output
 
     def prepare_for_dn_loss(self, model_outs, prefix=""):
+        # dn_valid_mask: 哪些 dn 条目是真实存在的，而不是 pad 出来的占位。
         dn_valid_mask = model_outs[f"{prefix}dn_valid_mask"].flatten(end_dim=1)
+        # dn_cls_target: valid dn 条目对应的分类监督。
         dn_cls_target = model_outs[f"{prefix}dn_cls_target"].flatten(
             end_dim=1
         )[dn_valid_mask]
+        # dn_reg_target: valid dn 条目对应的回归监督。
         dn_reg_target = model_outs[f"{prefix}dn_reg_target"].flatten(
             end_dim=1
         )[dn_valid_mask][..., : len(self.reg_weights)]
+        # dn_pos_mask=True 表示该 dn 条目是正样本，而不是仅用于分类的负 dn 条目。
         dn_pos_mask = dn_cls_target >= 0
         dn_reg_target = dn_reg_target[dn_pos_mask]
+        # reg_weights: dn 回归维度权重，和正常 query 使用同一套权重定义。
         reg_weights = dn_reg_target.new_tensor(self.reg_weights)[None].tile(
             dn_reg_target.shape[0], 1
         )
+        # num_dn_pos: dn loss 的平均因子。
         num_dn_pos = max(
             reduce_mean(torch.sum(dn_valid_mask).to(dtype=reg_weights.dtype)),
             1.0,
@@ -558,6 +614,7 @@ class Sparse4DHead(BaseModule):
 
     @force_fp32(apply_to=("model_outs"))
     def post_process(self, model_outs, output_idx=-1):
+        # post_process 只是一个轻量封装，真正的排序与 box 解码逻辑在 decoder 里。
         return self.decoder.decode(
             model_outs["classification"],
             model_outs["prediction"],
