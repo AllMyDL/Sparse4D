@@ -26,6 +26,7 @@ from datetime import timedelta
 
 import cv2
 
+# 限制 OpenCV 内部线程数量，避免 dataloader worker 过多时线程竞争过重。
 cv2.setNumThreads(8)
 
 
@@ -118,8 +119,10 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # 读取训练配置文件。
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
+        # 允许命令行临时覆盖配置中的任意字段。
         cfg.merge_from_dict(args.cfg_options)
     # import modules from string list.
     if cfg.get("custom_imports", None):
@@ -133,9 +136,11 @@ def main():
             import importlib
 
             if hasattr(cfg, "plugin_dir"):
+                # plugin_dir: 自定义 plugin 根目录，用于注册项目自己的模型/数据集/Hook。
                 plugin_dir = cfg.plugin_dir
                 _module_dir = os.path.dirname(plugin_dir)
                 _module_dir = _module_dir.split("/")
+                # _module_path: 转成 Python import 路径后进行动态导入。
                 _module_path = _module_dir[0]
 
                 for m in _module_dir[1:]:
@@ -155,6 +160,7 @@ def main():
 
     # set cudnn_benchmark
     if cfg.get("cudnn_benchmark", False):
+        # 固定尺寸训练时可提升卷积算子性能。
         torch.backends.cudnn.benchmark = True
 
     # work_dir is determined in this priority: CLI > segment in file > filename
@@ -167,14 +173,18 @@ def main():
             "./work_dirs", osp.splitext(osp.basename(args.config))[0]
         )
     if args.resume_from is not None:
+        # resume_from: 断点续训时要恢复的 checkpoint 路径。
         cfg.resume_from = args.resume_from
     if args.gpu_ids is not None:
+        # gpu_ids: 非分布式模式下显式指定使用哪些 GPU。
         cfg.gpu_ids = args.gpu_ids
     else:
+        # 若未指定，默认使用从 0 开始的前 args.gpus 张卡。
         cfg.gpu_ids = range(1) if args.gpus is None else range(args.gpus)
 
     if args.autoscale_lr:
         # apply the linear scaling rule (https://arxiv.org/abs/1706.02677)
+        # 以 8 卡为基准，按总卡数线性放大学习率。
         cfg.optimizer["lr"] = cfg.optimizer["lr"] * len(cfg.gpu_ids) / 8
 
     # init distributed env first, since logger depends on the dist info.
@@ -185,7 +195,9 @@ def main():
 
         import mpi4py.MPI as MPI
 
+        # comm: MPI 全局通信器。
         comm = MPI.COMM_WORLD
+        # mpi_local_rank: 当前进程在 MPI 中的 rank；mpi_world_size: 总进程数。
         mpi_local_rank = comm.Get_rank()
         mpi_world_size = comm.Get_size()
         print(
@@ -194,11 +206,14 @@ def main():
         )
 
         # num_gpus = torch.cuda.device_count()
+        # device_ids_on_machines: 当前机器上允许使用的 GPU 序号列表。
         device_ids_on_machines = list(range(args.gpus_per_machine))
         str_ids = list(map(str, device_ids_on_machines))
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str_ids)
+        # 将当前进程绑定到本机的一张具体 GPU 上。
         torch.cuda.set_device(mpi_local_rank % args.gpus_per_machine)
 
+        # 手动初始化 NCCL 进程组，适配 MPI 启动方式。
         dist.init_process_group(
             backend="nccl",
             init_method=args.dist_url,
@@ -211,6 +226,7 @@ def main():
         print("cfg.gpu_ids:", cfg.gpu_ids)
     else:
         distributed = True
+        # 标准 pytorch/slurm/mpi 启动方式由 MMCV 统一初始化分布式环境。
         init_dist(
             args.launcher, timeout=timedelta(seconds=3600), **cfg.dist_params
         )
@@ -219,10 +235,13 @@ def main():
         cfg.gpu_ids = range(world_size)
 
     # create work_dir
+    # 创建实验输出目录，用于保存配置、日志和 checkpoint。
     mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
     # dump config
+    # 把最终生效的配置落盘，便于复现实验。
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
     # init the logger before other steps
+    # timestamp: 当前实验时间戳，用于日志文件命名。
     timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     log_file = osp.join(cfg.work_dir, f"{timestamp}.log")
     # specify logger name, if we still use 'mmdet', the output info will be
@@ -234,8 +253,10 @@ def main():
 
     # init the meta dict to record some important information such as
     # environment info and seed, which will be logged
+    # meta: 附加到训练流程和 checkpoint 中的元信息。
     meta = dict()
     # log env info
+    # env_info_dict: 当前 Python、CUDA、PyTorch、MMCV 等环境信息。
     env_info_dict = collect_env()
     env_info = "\n".join([(f"{k}: {v}") for k, v in env_info_dict.items()])
     dash_line = "-" * 60 + "\n"
@@ -260,14 +281,17 @@ def main():
     meta["seed"] = args.seed
     meta["exp_name"] = osp.basename(args.config)
 
+    # 构建检测器模型，并按配置初始化权重。
     model = build_detector(
         cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg")
     )
     model.init_weights()
 
     logger.info(f"Model:\n{model}")
+    # datasets: 训练流程使用的数据集列表，至少包含 train。
     datasets = [build_dataset(cfg.data.train)]
     if len(cfg.workflow) == 2:
+        # workflow 长度为 2 时，通常表示 train/val 交替执行。
         val_dataset = copy.deepcopy(cfg.data.val)
         # in case we use a dataset wrapper
         if "dataset" in cfg.data.train:
@@ -290,6 +314,7 @@ def main():
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
     if hasattr(cfg, "plugin"):
+        # 如果启用了项目自定义 plugin，走自定义训练入口。
         custom_train_model(
             model,
             datasets,
@@ -300,6 +325,7 @@ def main():
             meta=meta,
         )
     else:
+        # 否则退回 MMDet 默认训练流程。
         train_detector(
             model,
             datasets,

@@ -17,7 +17,9 @@ class LoadMultiViewImageFromFiles(object):
     """
 
     def __init__(self, to_float32=False, color_type="unchanged"):
+        # to_float32: 后续颜色增强要求图像是 float32。
         self.to_float32 = to_float32
+        # color_type: mmcv.imread 的颜色读取模式。
         self.color_type = color_type
 
     def __call__(self, results):
@@ -38,6 +40,7 @@ class LoadMultiViewImageFromFiles(object):
                 - scale_factor (float): Scale factor.
                 - img_norm_cfg (dict): Normalization configuration of images.
         """
+        # filename: 多目图像路径列表，顺序必须与相机顺序严格一致。
         filename = results["img_filename"]
         # img is of shape (h, w, c, num_views)
         img = np.stack(
@@ -55,6 +58,7 @@ class LoadMultiViewImageFromFiles(object):
         # Set initial values for default meta_keys
         results["pad_shape"] = img.shape
         results["scale_factor"] = 1.0
+        # num_channels: 图像通道数，通常是 3。
         num_channels = 1 if len(img.shape) < 3 else img.shape[2]
         results["img_norm_cfg"] = dict(
             mean=np.zeros(num_channels, dtype=np.float32),
@@ -107,7 +111,9 @@ class LoadPointsFromFile(object):
         use_color=False,
         file_client_args=dict(backend="disk"),
     ):
+        # shift_height: 是否额外生成相对地面的高度特征。
         self.shift_height = shift_height
+        # use_color: 是否把最后 3 个维度当作 RGB 颜色特征。
         self.use_color = use_color
         if isinstance(use_dim, int):
             use_dim = list(range(use_dim))
@@ -117,7 +123,9 @@ class LoadPointsFromFile(object):
         assert coord_type in ["CAMERA", "LIDAR", "DEPTH"]
 
         self.coord_type = coord_type
+        # load_dim: 每个点在原始文件中的总维数。
         self.load_dim = load_dim
+        # use_dim: 真正保留用于训练/辅助监督的维度索引。
         self.use_dim = use_dim
         self.file_client_args = file_client_args.copy()
         self.file_client = None
@@ -132,8 +140,10 @@ class LoadPointsFromFile(object):
             np.ndarray: An array containing point clouds data.
         """
         if self.file_client is None:
+            # file_client: MMCV 的统一文件访问抽象，支持本地盘/远程存储。
             self.file_client = mmcv.FileClient(**self.file_client_args)
         try:
+            # 优先走 file client，兼容更丰富的存储后端。
             pts_bytes = self.file_client.get(pts_filename)
             points = np.frombuffer(pts_bytes, dtype=np.float32)
         except ConnectionError:
@@ -159,12 +169,14 @@ class LoadPointsFromFile(object):
         """
         pts_filename = results["pts_filename"]
         points = self._load_points(pts_filename)
+        # 先恢复成 [N, load_dim]，再按 use_dim 截取所需特征。
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
         attribute_dims = None
         # 在 Sparse4D 里点云主要用于生成辅助深度图，而不是直接送入主干。
 
         if self.shift_height:
+            # floor_height: 用较高分位值近似地面，构造相对高度特征。
             floor_height = np.percentile(points[:, 2], 0.99)
             height = points[:, 2] - floor_height
             points = np.concatenate(

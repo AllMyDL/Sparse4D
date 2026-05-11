@@ -29,6 +29,7 @@ def sync_random_seed(seed=None, device="cuda"):
         int: Seed to be used.
     """
     if seed is None:
+        # 若用户未指定，则随机采一个足够大的整数种子。
         seed = np.random.randint(2**31)
     assert isinstance(seed, int)
 
@@ -41,6 +42,7 @@ def sync_random_seed(seed=None, device="cuda"):
         random_num = torch.tensor(seed, dtype=torch.int32, device=device)
     else:
         random_num = torch.tensor(0, dtype=torch.int32, device=device)
+    # 所有进程广播同一个 seed，确保采样顺序在 rank 间对齐。
     dist.broadcast(random_num, src=0)
     return random_num.item()
 
@@ -76,12 +78,15 @@ class GroupInBatchSampler(Sampler):
         self.rank = rank
         self.seed = sync_random_seed(seed)
 
+        # size: 底层 dataset 样本总数。
         self.size = len(self.dataset)
 
         assert hasattr(self.dataset, "flag")
+        # flag: 每个样本所属的 group / 序列编号。
         self.flag = self.dataset.flag
         self.group_sizes = np.bincount(self.flag)
         self.groups_num = len(self.group_sizes)
+        # global_batch_size: 所有 rank 合起来一次迭代的样本总数。
         self.global_batch_size = batch_size * world_size
         assert self.groups_num >= self.global_batch_size
 
@@ -103,18 +108,22 @@ class GroupInBatchSampler(Sampler):
         ]
 
         # Keep track of a buffer of dataset sample idxs for each local sample idx
+        # buffer_per_local_sample: 当前 rank 内每个槽位尚未消费的序列样本缓存。
         self.buffer_per_local_sample = [[] for _ in range(self.batch_size)]
+        # aug_per_local_sample: 若要求序列增强一致，则整条序列共享一份增强参数。
         self.aug_per_local_sample = [None for _ in range(self.batch_size)]
         self.skip_prob = skip_prob
         self.sequence_flip_prob = sequence_flip_prob
 
     def _infinite_group_indices(self):
+        # g: 独立随机数发生器，保证序列打乱顺序可复现。
         g = torch.Generator()
         g.manual_seed(self.seed)
         while True:
             yield from torch.randperm(self.groups_num, generator=g).tolist()
 
     def _group_indices_per_global_sample_idx(self, global_sample_idx):
+        # 不同全局槽位在 group 列表上做错位抽样，避免 batch 内槽位撞到同一序列。
         yield from itertools.islice(
             self._infinite_group_indices(),
             global_sample_idx,
@@ -126,6 +135,7 @@ class GroupInBatchSampler(Sampler):
         while True:
             curr_batch = []
             for local_sample_idx in range(self.batch_size):
+                # skip: 是否随机跳过当前序列中的一帧。
                 skip = (
                     np.random.uniform() < self.skip_prob
                     and len(self.buffer_per_local_sample[local_sample_idx]) > 1
@@ -165,6 +175,7 @@ class GroupInBatchSampler(Sampler):
                 if skip:
                     # skip 的作用是随机跳过序列中的部分帧，增加时间间隔多样性。
                     self.buffer_per_local_sample[local_sample_idx].pop(0)
+                # curr_batch 中每个元素都带上 idx 和 aug_config，dataset.__getitem__ 会识别。
                 curr_batch.append(
                     dict(
                         idx=self.buffer_per_local_sample[local_sample_idx].pop(
@@ -181,4 +192,5 @@ class GroupInBatchSampler(Sampler):
         return self.size
 
     def set_epoch(self, epoch):
+        # 这里保留统一接口，便于和其他 sampler 兼容。
         self.epoch = epoch

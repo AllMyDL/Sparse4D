@@ -8,22 +8,27 @@ from projects.mmdet3d_plugin.core.box3d import *
 
 
 def box3d_to_corners(box3d):
+    # 兼容 torch.Tensor 和 numpy.ndarray 两种输入。
     if isinstance(box3d, torch.Tensor):
         box3d = box3d.detach().cpu().numpy()
+    # corners_norm: 单位立方体 8 个顶点的相对坐标。
     corners_norm = np.stack(np.unravel_index(np.arange(8), [2] * 3), axis=1)
     corners_norm = corners_norm[[0, 1, 3, 2, 4, 5, 7, 6]]
     # use relative origin [0.5, 0.5, 0]
     corners_norm = corners_norm - np.array([0.5, 0.5, 0.5])
+    # corners: 先按 box 尺寸把单位立方体缩放成真实长宽高。
     corners = box3d[:, None, [W, L, H]] * corners_norm.reshape([1, 8, 3])
 
     # rotate around z axis
     rot_cos = np.cos(box3d[:, YAW])
     rot_sin = np.sin(box3d[:, YAW])
+    # rot_mat: 每个 box 对应一个 3x3 z 轴旋转矩阵。
     rot_mat = np.tile(np.eye(3)[None], (box3d.shape[0], 1, 1))
     rot_mat[:, 0, 0] = rot_cos
     rot_mat[:, 0, 1] = -rot_sin
     rot_mat[:, 1, 0] = rot_sin
     rot_mat[:, 1, 1] = rot_cos
+    # 先旋转，再平移到 box 中心，得到 8 个真实角点。
     corners = (rot_mat[:, None] @ corners[..., None]).squeeze(axis=-1)
     corners += box3d[:, None, :3]
     return corners
@@ -59,6 +64,7 @@ def plot_rect3d_on_img(
     )
     h, w = img.shape[:2]
     for i in range(num_rects):
+        # corners: 当前框在图像平面上的 8 个角点坐标。
         corners = np.clip(rect_corners[i], -1e4, 1e5).astype(np.int32)
         for start, end in line_indices:
             if (
@@ -110,6 +116,7 @@ def draw_lidar_bbox3d_on_img(
     img = raw_img.copy()
     # corners_3d = bboxes3d.corners
     corners_3d = box3d_to_corners(bboxes3d)
+    # num_bbox: 当前待画的 3D 框数量。
     num_bbox = corners_3d.shape[0]
     pts_4d = np.concatenate(
         [corners_3d.reshape(-1, 3), np.ones((num_bbox * 8, 1))], axis=-1
@@ -117,6 +124,7 @@ def draw_lidar_bbox3d_on_img(
     lidar2img_rt = copy.deepcopy(lidar2img_rt).reshape(4, 4)
     if isinstance(lidar2img_rt, torch.Tensor):
         lidar2img_rt = lidar2img_rt.cpu().numpy()
+    # pts_2d: 角点齐次坐标投影到图像后的结果。
     pts_2d = pts_4d @ lidar2img_rt.T
 
     pts_2d[:, 2] = np.clip(pts_2d[:, 2], a_min=1e-5, a_max=1e5)
@@ -129,6 +137,7 @@ def draw_lidar_bbox3d_on_img(
 
 def draw_points_on_img(points, img, lidar2img_rt, color=(0, 255, 0), circle=4):
     img = img.copy()
+    # N: 批内点集数量，通常每个元素代表一个实例的一组关键点。
     N = points.shape[0]
     points = points.cpu().numpy()
     lidar2img_rt = copy.deepcopy(lidar2img_rt).reshape(4, 4)
@@ -158,9 +167,11 @@ def draw_lidar_bbox3d_on_bev(
         bev_h, bev_w = bev_size
     else:
         bev_h, bev_w = bev_size, bev_size
+    # bev: 鸟瞰图画布。
     bev = np.zeros([bev_h, bev_w, 3])
 
     marking_color = (127, 127, 127)
+    # bev_resolution: 每个像素代表多少米。
     bev_resolution = bev_range / bev_h
     for cir in range(int(bev_range / 2 / 10)):
         cv2.circle(
@@ -183,6 +194,7 @@ def draw_lidar_bbox3d_on_bev(
         marking_color,
     )
     if len(bboxes_3d) != 0:
+        # 只取顶面四个角点，在 BEV 里画矩形轮廓。
         bev_corners = box3d_to_corners(bboxes_3d)[:, [0, 3, 4, 7]][
             ..., [0, 1]
         ]
@@ -205,6 +217,7 @@ def draw_lidar_bbox3d_on_bev(
 
 
 def draw_lidar_bbox3d(bboxes_3d, imgs, lidar2imgs, color=(255, 0, 0)):
+    # vis_imgs: 各视角图像叠加 3D 框后的可视化结果。
     vis_imgs = []
     for i, (img, lidar2img) in enumerate(zip(imgs, lidar2imgs)):
         vis_imgs.append(
@@ -213,6 +226,7 @@ def draw_lidar_bbox3d(bboxes_3d, imgs, lidar2imgs, color=(255, 0, 0)):
 
     num_imgs = len(vis_imgs)
     if num_imgs < 4 or num_imgs % 2 != 0:
+        # 相机数较少或无法整齐分两行时，直接横向拼接。
         vis_imgs = np.concatenate(vis_imgs, axis=1)
     else:
         vis_imgs = np.concatenate([
@@ -221,5 +235,6 @@ def draw_lidar_bbox3d(bboxes_3d, imgs, lidar2imgs, color=(255, 0, 0)):
         ], axis=0)
 
     bev = draw_lidar_bbox3d_on_bev(bboxes_3d, vis_imgs.shape[0], color=color)
+    # 最终把 BEV 拼到左侧，形成“BEV + 多视角图像”的总览图。
     vis_imgs = np.concatenate([bev, vis_imgs], axis=1)
     return vis_imgs

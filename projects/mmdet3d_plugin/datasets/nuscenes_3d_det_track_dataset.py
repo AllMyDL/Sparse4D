@@ -26,6 +26,7 @@ from .utils import (
 
 @DATASETS.register_module()
 class NuScenes3DDetTrackDataset(Dataset):
+    # DefaultAttribute: nuScenes 官方评测要求的默认属性标签映射。
     DefaultAttribute = {
         "car": "vehicle.parked",
         "pedestrian": "pedestrian.moving",
@@ -92,26 +93,34 @@ class NuScenes3DDetTrackDataset(Dataset):
         tracking=False,
         tracking_threshold=0.2,
     ):
+        # version: 数据集版本名，如 v1.0-trainval / custom。
         self.version = version
+        # load_interval: 按固定步长抽帧，可用于快速实验。
         self.load_interval = load_interval
+        # use_valid_flag: 是否使用预处理阶段给出的 valid_flag 过滤 GT。
         self.use_valid_flag = use_valid_flag
         super().__init__()
         self.data_root = data_root
         self.ann_file = ann_file
         self.test_mode = test_mode
+        # modality: 当前实验使用哪些传感器模态。
         self.modality = modality
+        # box_mode_3d: 与 mmdet3d 保持兼容的 3D box 模式标记。
         self.box_mode_3d = 0
 
         if classes is not None:
             self.CLASSES = classes
+        # cat2id: 类别名到整数标签的映射表。
         self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
         self.data_infos = self.load_annotations(self.ann_file)
 
         if pipeline is not None:
+            # Compose: 把配置里的 pipeline 列表拼成一个可调用链。
             self.pipeline = Compose(pipeline)
 
         self.with_velocity = with_velocity
         self.det3d_eval_version = det3d_eval_version
+        # det3d_eval_configs / track3d_eval_configs: nuScenes 官方评测配置。
         self.det3d_eval_configs = det_configs(self.det3d_eval_version)
         self.track3d_eval_version = track3d_eval_version
         self.track3d_eval_configs = track_configs(self.track3d_eval_version)
@@ -125,10 +134,14 @@ class NuScenes3DDetTrackDataset(Dataset):
             )
         self.vis_score_threshold = vis_score_threshold
 
+        # data_aug_conf: 多目图像几何增强参数集合。
         self.data_aug_conf = data_aug_conf
+        # tracking: 是否在评估阶段同时运行 tracking 指标。
         self.tracking = tracking
         self.tracking_threshold = tracking_threshold
+        # sequences_split_num: 是否把长序列再细分成更短组。
         self.sequences_split_num = sequences_split_num
+        # keep_consistent_seq_aug: 同一条序列内部是否共享增强参数。
         self.keep_consistent_seq_aug = keep_consistent_seq_aug
         self.current_aug = None
         self.last_id = None
@@ -142,6 +155,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         """
         Set each sequence to be a different group
         """
+        # res: 每个样本所属序列编号的列表。
         res = []
 
         curr_sequence = 0
@@ -155,14 +169,17 @@ class NuScenes3DDetTrackDataset(Dataset):
 
         if self.sequences_split_num != 1:
             if self.sequences_split_num == "all":
+                # "all" 模式下每一帧都视为独立 group。
                 self.flag = np.array(
                     range(len(self.data_infos)), dtype=np.int64
                 )
             else:
+                # bin_counts: 每条原始序列包含多少帧。
                 bin_counts = np.bincount(self.flag)
                 new_flags = []
                 curr_new_flag = 0
                 for curr_flag in range(len(bin_counts)):
+                    # curr_sequence_length: 把一条长序列切成若干连续子段的边界。
                     curr_sequence_length = np.array(
                         list(
                             range(
@@ -195,6 +212,7 @@ class NuScenes3DDetTrackDataset(Dataset):
     def get_augmentation(self):
         if self.data_aug_conf is None:
             return None
+        # H, W: 原始图像分辨率；fH, fW: 网络最终输入分辨率。
         H, W = self.data_aug_conf["H"], self.data_aug_conf["W"]
         fH, fW = self.data_aug_conf["final_dim"]
         if not self.test_mode:
@@ -229,6 +247,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             flip = False
             rotate = 0
             rotate_3d = 0
+        # aug_config: 当前样本要应用到图像和 3D 框上的增强配置。
         aug_config = {
             "resize": resize,
             "resize_dims": resize_dims,
@@ -241,6 +260,7 @@ class NuScenes3DDetTrackDataset(Dataset):
 
     def __getitem__(self, idx):
         if isinstance(idx, dict):
+            # IterBasedRunner + GroupInBatchSampler 会把 idx 和增强参数打包成 dict。
             aug_config = idx["aug_config"]
             idx = idx["idx"]
         else:
@@ -252,6 +272,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         return data
 
     def get_cat_ids(self, idx):
+        # info: 当前样本在 info pkl 中的原始记录。
         info = self.data_infos[idx]
         if self.use_valid_flag:
             mask = info["valid_flag"]
@@ -259,6 +280,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         else:
             gt_names = set(info["gt_names"])
 
+        # cat_ids: 当前样本实际出现过的类别 id 集合。
         cat_ids = []
         for name in gt_names:
             if name in self.CLASSES:
@@ -270,6 +292,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         # 时序模型默认按时间顺序读取样本，因此这里先按 timestamp 排序。
         data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
         data_infos = data_infos[:: self.load_interval]
+        # metadata: 记录数据集版本等全局信息。
         self.metadata = data["metadata"]
         self.version = self.metadata["version"]
         print(self.metadata)
@@ -278,6 +301,7 @@ class NuScenes3DDetTrackDataset(Dataset):
     def get_data_info(self, index):
         info = self.data_infos[index]
         # standard protocol modified from SECOND.Pytorch
+        # input_dict: pipeline 的基础输入字典。
         input_dict = dict(
             sample_idx=info["token"],
             pts_filename=info["lidar_path"],
@@ -288,6 +312,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             ego2global_translation=info["ego2global_translation"],
             ego2global_rotation=info["ego2global_rotation"],
         )
+        # 把四元数 + 平移恢复成 4x4 齐次矩阵，后面会反复用到。
         lidar2ego = np.eye(4)
         lidar2ego[:3, :3] = pyquaternion.Quaternion(
             info["lidar2ego_rotation"]
@@ -308,6 +333,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             for cam_type, cam_info in info["cams"].items():
                 image_paths.append(cam_info["data_path"])
                 # obtain lidar to image transformation matrix
+                # sensor2lidar_rotation/translation 是 camera->lidar，先求其逆得到 lidar->camera。
                 lidar2cam_r = np.linalg.inv(cam_info["sensor2lidar_rotation"])
                 lidar2cam_t = (
                     cam_info["sensor2lidar_translation"] @ lidar2cam_r.T
@@ -319,6 +345,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 cam_intrinsic.append(intrinsic)
                 viewpad = np.eye(4)
                 viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic
+                # lidar2img_rt: 最终 4x4 lidar->image 投影矩阵。
                 lidar2img_rt = viewpad @ lidar2cam_rt.T
                 lidar2img_rts.append(lidar2img_rt)
 
@@ -353,18 +380,21 @@ class NuScenes3DDetTrackDataset(Dataset):
         gt_labels_3d = np.array(gt_labels_3d)
 
         if self.with_velocity:
+            # gt_velocity: 速度监督，shape 通常是 [N, 2]。
             gt_velocity = info["gt_velocity"][mask]
             nan_mask = np.isnan(gt_velocity[:, 0])
             gt_velocity[nan_mask] = [0.0, 0.0]
             # 速度直接拼接到 box 后面，与 Sparse4D 的状态向量定义对齐。
             gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
 
+        # anns_results: 训练阶段真正送入 pipeline 的 GT 字段集合。
         anns_results = dict(
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
             gt_names=gt_names_3d,
         )
         if "instance_inds" in info:
+            # instance_inds: 同一物体跨时间帧共享的实例 id。
             instance_inds = np.array(info["instance_inds"], dtype=np.int)[mask]
             anns_results["instance_inds"] = instance_inds
         return anns_results
@@ -376,6 +406,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         print("Start to convert detection format...")
         for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
             annos = []
+            # boxes: 把模型输出转成 nuScenes 官方 Box 对象。
             boxes = output_to_nusc_box(
                 det, threshold=self.tracking_threshold if tracking else None
             )
@@ -390,6 +421,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             )
             for i, box in enumerate(boxes):
                 name = mapped_class_names[box.label]
+                # tracking 评测里会忽略官方不要求跟踪的几类目标。
                 if tracking and name in [
                     "barrier",
                     "traffic_cone",
@@ -417,6 +449,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     else:
                         attr = NuScenes3DDetTrackDataset.DefaultAttribute[name]
 
+                # nusc_anno: 官方评测 json 的单个预测框格式。
                 nusc_anno = dict(
                     sample_token=sample_token,
                     translation=box.center.tolist(),
@@ -443,6 +476,7 @@ class NuScenes3DDetTrackDataset(Dataset):
 
                 annos.append(nusc_anno)
             nusc_annos[sample_token] = annos
+        # nusc_submissions: 完整提交文件内容。
         nusc_submissions = {
             "meta": self.modality,
             "results": nusc_annos,
@@ -459,6 +493,7 @@ class NuScenes3DDetTrackDataset(Dataset):
     ):
         from nuscenes import NuScenes
 
+        # output_dir: 当前评测结果所在目录。
         output_dir = osp.join(*osp.split(result_path)[:-1])
         nusc = NuScenes(
             version=self.version, dataroot=self.data_root, verbose=False
@@ -548,6 +583,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         assert isinstance(results, list), "results must be a list"
 
         if jsonfile_prefix is None:
+            # tmp_dir: 用户未指定输出目录时，临时建一个目录承接评测 json。
             tmp_dir = tempfile.TemporaryDirectory()
             jsonfile_prefix = osp.join(tmp_dir.name, "results")
         else:
@@ -561,6 +597,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             result_files = dict()
             for name in results[0]:
                 print(f"\nFormating bboxes of {name}")
+                # results_: 取出某个输出分支（如 img_bbox）对应的所有预测结果。
                 results_ = [out[name] for out in results]
                 tmp_file_ = osp.join(jsonfile_prefix, name)
                 # 多分支结果分别导出，便于独立评测不同输出头。
@@ -584,6 +621,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         out_dir=None,
         pipeline=None,
     ):
+        # 统一串行跑 detection 与 tracking 两套评测逻辑。
         for metric in ["detection", "tracking"]:
             tracking = metric == "tracking"
             if tracking and not self.tracking:
@@ -614,6 +652,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         save_dir = "./" if save_dir is None else save_dir
         save_dir = os.path.join(save_dir, "visual")
         print_log(os.path.abspath(save_dir))
+        # pipeline: 可视化时单独使用的轻量 pipeline，一般只加载图像和 meta。
         pipeline = Compose(pipeline)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -624,21 +663,25 @@ class NuScenes3DDetTrackDataset(Dataset):
         for i, result in enumerate(results):
             if "img_bbox" in result.keys():
                 result = result["img_bbox"]
+            # data_info: 重走一次可视化 pipeline，得到原图和 lidar2img。
             data_info = pipeline(self.get_data_info(i))
             imgs = []
 
             raw_imgs = data_info["img"]
             lidar2img = data_info["img_metas"].data["lidar2img"]
+            # pred_bboxes_3d: 只保留分数高于阈值的预测框。
             pred_bboxes_3d = result["boxes_3d"][
                 result["scores_3d"] > self.vis_score_threshold
             ]
             if "instance_ids" in result and self.tracking:
+                # tracking 模式下按实例 id 上色，便于观察轨迹一致性。
                 color = []
                 for id in result["instance_ids"].cpu().numpy().tolist():
                     color.append(
                         self.ID_COLOR_MAP[int(id % len(self.ID_COLOR_MAP))]
                     )
             elif "labels_3d" in result:
+                # detection 模式下按类别上色。
                 color = []
                 for id in result["labels_3d"].cpu().numpy().tolist():
                     color.append(self.ID_COLOR_MAP[id])
@@ -721,6 +764,7 @@ class NuScenes3DDetTrackDataset(Dataset):
 
 
 def output_to_nusc_box(detection, threshold=None):
+    # detection: 模型对单帧输出的预测结果字典。
     box3d = detection["boxes_3d"]
     scores = detection["scores_3d"].numpy()
     labels = detection["labels_3d"].numpy()
@@ -738,11 +782,13 @@ def output_to_nusc_box(detection, threshold=None):
         ids = ids[mask]
 
     if hasattr(box3d, "gravity_center"):
+        # LiDARInstance3DBoxes 路径：从对象属性里取中心、尺寸、朝向。
         box_gravity_center = box3d.gravity_center.numpy()
         box_dims = box3d.dims.numpy()
         nus_box_dims = box_dims[:, [1, 0, 2]]
         box_yaw = box3d.yaw.numpy()
     else:
+        # numpy 路径：直接按数组列切分字段。
         box3d = box3d.numpy()
         box_gravity_center = box3d[..., :3].copy()
         box_dims = box3d[..., 3:6].copy()
@@ -753,6 +799,7 @@ def output_to_nusc_box(detection, threshold=None):
     # with dir_offset & dir_limit in the head
     # box_yaw = -box_yaw - np.pi / 2
 
+    # box_list: 转成 NuScenesBox 后的列表。
     box_list = []
     for i in range(len(box3d)):
         quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw[i])
@@ -788,6 +835,7 @@ def lidar_nusc_box_to_global(
         box.rotate(pyquaternion.Quaternion(info["lidar2ego_rotation"]))
         box.translate(np.array(info["lidar2ego_translation"]))
         # filter det in ego.
+        # cls_range_map: nuScenes 各类别允许的最大评测半径。
         cls_range_map = eval_configs.class_range
         radius = np.linalg.norm(box.center[:2], 2)
         det_range = cls_range_map[classes[box.label]]

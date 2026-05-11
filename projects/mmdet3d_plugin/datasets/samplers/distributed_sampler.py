@@ -10,6 +10,7 @@ import sys
 
 class ForkedPdb(pdb.Pdb):
     def interaction(self, *args, **kwargs):
+        # 在多进程/子进程里调试时，手动把 stdin 指回真实终端。
         _stdin = sys.stdin
         try:
             sys.stdin = open("/dev/stdin")
@@ -19,6 +20,7 @@ class ForkedPdb(pdb.Pdb):
 
 
 def set_trace():
+    # 提供一个在 fork 后子进程内也能用的 set_trace 快捷入口。
     ForkedPdb().set_trace(sys._getframe().f_back)
 
 
@@ -37,9 +39,11 @@ class DistributedSampler(_DistributedSampler):
         # deterministically shuffle based on epoch
         assert not self.shuffle
         if "data_infos" in dir(self.dataset):
+            # timestamps: 当前数据集每一帧的时间戳，单位转成秒。
             timestamps = [
                 x["timestamp"] / 1e6 for x in self.dataset.data_infos
             ]
+            # vehicle_idx: 通过文件名前缀粗略区分车辆/采集序列来源。
             vehicle_idx = [
                 x["lidar_path"].split("/")[-1][:4]
                 if "lidar_path" in x
@@ -58,6 +62,7 @@ class DistributedSampler(_DistributedSampler):
                 for x in self.dataset.datasets[0].data_infos
             ] * len(self.dataset.datasets)
 
+        # sequence_splits: 把连续时间帧切成多个序列段。
         sequence_splits = []
         for i in range(len(timestamps)):
             if i == 0 or (
@@ -68,6 +73,7 @@ class DistributedSampler(_DistributedSampler):
             else:
                 sequence_splits[-1].append(i)
 
+        # 按完整序列为单位分给不同 rank，避免一个序列被不同 GPU 截断得过碎。
         indices = []
         perfix_sum = 0
         split_length = len(self.dataset) // self.num_replicas

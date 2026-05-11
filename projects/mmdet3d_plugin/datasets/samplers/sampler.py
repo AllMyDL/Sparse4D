@@ -1,5 +1,6 @@
 from mmcv.utils.registry import Registry, build_from_cfg
 
+# SAMPLER: 当前项目自定义 sampler 的 registry。
 SAMPLER = Registry("sampler")
 
 

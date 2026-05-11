@@ -45,6 +45,7 @@ class DistributedGroupSampler(Sampler):
         self.seed = seed if seed is not None else 0
 
         assert hasattr(self.dataset, "flag")
+        # flag: 每个样本所属 group，常用于把形状相近或同序列样本放在一起。
         self.flag = self.dataset.flag
         self.group_sizes = np.bincount(self.flag)
 
@@ -61,16 +62,19 @@ class DistributedGroupSampler(Sampler):
                 )
                 * self.samples_per_gpu
             )
+        # total_size: 所有 rank 加总后，一个 epoch 实际会取到的样本数。
         self.total_size = self.num_samples * self.num_replicas
 
     def __iter__(self):
         # deterministically shuffle based on epoch
+        # g: 绑定 epoch 的随机数发生器，每个 epoch 采样顺序不同但可复现。
         g = torch.Generator()
         g.manual_seed(self.epoch + self.seed)
 
         indices = []
         for i, size in enumerate(self.group_sizes):
             if size > 0:
+                # indice: 当前 group 中所有样本的原始下标。
                 indice = np.where(self.flag == i)[0]
                 assert len(indice) == size
                 # add .numpy() to avoid bug when selecting indice in parrots.
@@ -95,6 +99,7 @@ class DistributedGroupSampler(Sampler):
 
         assert len(indices) == self.total_size
 
+        # 先以 batch 为单位打乱 group 内样本块，再展开成一维索引序列。
         indices = [
             indices[j]
             for i in list(
@@ -119,4 +124,5 @@ class DistributedGroupSampler(Sampler):
         return self.num_samples
 
     def set_epoch(self, epoch):
+        # epoch 变化后，下一次 __iter__ 会基于新种子重排。
         self.epoch = epoch

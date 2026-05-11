@@ -10,13 +10,17 @@ from PIL import Image
 @PIPELINES.register_module()
 class ResizeCropFlipImage(object):
     def __call__(self, results):
+        # aug_config: 数据集提前采样好的几何增强参数。
         aug_config = results.get("aug_config")
         if aug_config is None:
             return results
+        # imgs: 多目图像列表，每个元素是一个视角的 HWC 图像。
         imgs = results["img"]
+        # N: 相机视角数量。
         N = len(imgs)
         new_imgs = []
         for i in range(N):
+            # mat: 当前图像对应的 4x4 像素平面变换矩阵。
             img, mat = self._img_transform(
                 np.uint8(imgs[i]), aug_config,
             )
@@ -34,6 +38,7 @@ class ResizeCropFlipImage(object):
         return results
 
     def _img_transform(self, img, aug_configs):
+        # H, W: 原图高宽。
         H, W = img.shape[:2]
         resize = aug_configs.get("resize", 1)
         resize_dims = (int(W * resize), int(H * resize))
@@ -41,10 +46,12 @@ class ResizeCropFlipImage(object):
         flip = aug_configs.get("flip", False)
         rotate = aug_configs.get("rotate", 0)
 
+        # origin_dtype: 记录原始图像类型，便于最后还原数值尺度。
         origin_dtype = img.dtype
         if origin_dtype != np.uint8:
             min_value = img.min()
             max_vaule = img.max()
+            # scale: 把任意 dtype 的图像临时映射到 0~255，方便 PIL 处理。
             scale = 255 / (max_vaule - min_value)
             img = (img - min_value) * scale
             img = np.uint8(img)
@@ -58,6 +65,7 @@ class ResizeCropFlipImage(object):
             img = img.astype(np.float32)
             img = img / scale + min_value
 
+        # transform_matrix: 图像平面上的 3x3 仿射矩阵。
         transform_matrix = np.eye(3)
         # 显式组合 resize/crop/flip/rotate，对应图像上发生的全部仿射变化。
         transform_matrix[:2, :2] *= resize
@@ -75,9 +83,11 @@ class ResizeCropFlipImage(object):
                 [0, 0, 1],
             ]
         )
+        # rot_center: 以裁剪后图像中心作为旋转中心，减少视角偏移。
         rot_center = np.array([crop[2] - crop[0], crop[3] - crop[1]]) / 2
         rot_matrix[:2, 2] = -rot_matrix[:2, :2] @ rot_center + rot_center
         transform_matrix = rot_matrix @ transform_matrix
+        # extend_matrix: 扩展成 4x4 形式，便于直接左乘 lidar2img。
         extend_matrix = np.eye(4)
         extend_matrix[:3, :3] = transform_matrix
         return img, extend_matrix
@@ -86,10 +96,12 @@ class ResizeCropFlipImage(object):
 @PIPELINES.register_module()
 class BBoxRotation(object):
     def __call__(self, results):
+        # angle: 在 lidar 坐标系下对整帧做的随机旋转角。
         angle = results["aug_config"]["rotate_3d"]
         rot_cos = np.cos(angle)
         rot_sin = np.sin(angle)
 
+        # rot_mat: 4x4 齐次旋转矩阵，仅绕 z 轴旋转。
         rot_mat = np.array(
             [
                 [rot_cos, -rot_sin, 0, 0],
@@ -100,6 +112,7 @@ class BBoxRotation(object):
         )
         rot_mat_inv = np.linalg.inv(rot_mat)
 
+        # num_view: 相机视角数。
         num_view = len(results["lidar2img"])
         for view in range(num_view):
             # 3D 旋转增强发生在 lidar 坐标系，因此相机投影矩阵也要做反向补偿。
@@ -116,12 +129,15 @@ class BBoxRotation(object):
 
     @staticmethod
     def box_rotate(bbox_3d, angle):
+        # rot_mat_T: 对 xyz 以及速度向量使用的 3x3 平面旋转矩阵转置。
         rot_cos = np.cos(angle)
         rot_sin = np.sin(angle)
         rot_mat_T = np.array(
             [[rot_cos, rot_sin, 0], [-rot_sin, rot_cos, 0], [0, 0, 1]]
         )
+        # 前 3 维是中心点坐标，跟随整帧一起旋转。
         bbox_3d[:, :3] = bbox_3d[:, :3] @ rot_mat_T
+        # 第 6 维是 yaw，需要同步加上旋转角。
         bbox_3d[:, 6] += angle
         if bbox_3d.shape[-1] > 7:
             vel_dims = bbox_3d[:, 7:].shape[-1]
@@ -157,6 +173,8 @@ class PhotoMetricDistortionMultiViewImage:
         saturation_range=(0.5, 1.5),
         hue_delta=18,
     ):
+        # brightness_delta / contrast_* / saturation_* / hue_delta:
+        # 颜色扰动的随机采样范围。
         self.brightness_delta = brightness_delta
         self.contrast_lower, self.contrast_upper = contrast_range
         self.saturation_lower, self.saturation_upper = saturation_range
@@ -188,6 +206,7 @@ class PhotoMetricDistortionMultiViewImage:
             mode = random.randint(2)
             if mode == 1:
                 if random.randint(2):
+                    # alpha: 随机对比度缩放因子。
                     alpha = random.uniform(
                         self.contrast_lower, self.contrast_upper
                     )
